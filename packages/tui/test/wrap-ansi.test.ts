@@ -50,7 +50,60 @@ describe("wrapTextWithAnsi", () => {
 			}
 		});
 	});
+	describe("styled text wrapping regression", () => {
+		it("does not leave trailing whitespace before an ANSI reset", () => {
+			const underlineOn = "\x1b[4m";
+			const underlineOff = "\x1b[24m";
+	
+			const text = `hello ${underlineOn}world ${underlineOff}next`;
+	
+			const wrapped = wrapTextWithAnsi(text, 11);
+	
+			assert.ok(wrapped.length > 1);
+	
+			// The first line should not contain a space
+			// immediately before the underline reset.
+			assert.ok(
+				!wrapped[0].includes(` ${underlineOff}`),
+				`Unexpected whitespace before reset: ${JSON.stringify(wrapped[0])}`,
+			);
+		});
 
+		it("resets both underline and strikethrough when wrapping", () => {
+			const underlineOn = "\x1b[4m";
+			const strikeOn = "\x1b[9m";
+		
+			const text = `${underlineOn}${strikeOn}hello world again`;
+			const wrapped = wrapTextWithAnsi(text, 10);
+		
+			assert.ok(wrapped.length > 1);
+		
+			for (const line of wrapped.slice(0, -1)) {
+				assert.ok(
+					line.endsWith("\x1b[24m\x1b[29m"),
+					`Expected both styles to reset: ${JSON.stringify(line)}`,
+				);
+			}
+		});
+	
+		it("does not leave strikethrough active at a wrapped line boundary", () => {
+			const strikeOn = "\x1b[9m";
+			const strikeOff = "\x1b[29m";
+	
+			const text = `${strikeOn}hello world again${strikeOff}`;
+	
+			const wrapped = wrapTextWithAnsi(text, 10);
+	
+			assert.ok(wrapped.length > 1);
+	
+			for (const line of wrapped.slice(0, -1)) {
+				assert.ok(
+					line.endsWith(strikeOff),
+					`Strikethrough remains active: ${JSON.stringify(line)}`,
+				);
+			}
+		});
+	});
 	describe("background color preservation", () => {
 		it("should preserve background color across wrapped lines without full reset", () => {
 			const bgBlue = "\x1b[44m";

@@ -752,18 +752,23 @@ class AnsiCodeTracker {
 
 	/**
 	 * Get reset codes for attributes that need to be turned off at line end.
-	 * Underline must be closed to prevent bleeding into padding.
+	 * Underline and strikethrough must be closed to prevent bleeding into padding.
 	 * Active OSC 8 hyperlinks must be closed and re-opened on the next line.
 	 * Returns empty string if no attributes need closing.
 	 */
 	getLineEndReset(): string {
 		let result = "";
+	
 		if (this.underline) {
-			result += "\x1b[24m"; // Underline off only
+			result += "\x1b[24m"; // Underline off
+		}
+		if (this.strikethrough) {
+			result += "\x1b[29m"; // Strikethrough off
 		}
 		if (this.activeHyperlink) {
-			result += formatOsc8Close(this.activeHyperlink.terminator); // Re-opened at line start via getActiveCodes()
+			result += formatOsc8Close(this.activeHyperlink.terminator);
 		}
+	
 		return result;
 	}
 }
