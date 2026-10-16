@@ -69,6 +69,199 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 
 <a id="extensionapi-methods"></a>
 
+### Extension lifecycle overview
+
+The following diagram shows the main events that occur during
+extension startup, agent execution, and session changes.
+
+```text
+Pi starts
+  |
+  +--> project_trust
+  +--> session_start
+  +--> resources_discover
+  |
+  v
+User sends a prompt
+  |
+  +--> input
+  +--> before_agent_start
+  +--> agent_start
+  |
+  +--> turn_start
+  |      |
+  |      +--> context
+  |      +--> context_with_system
+  |      +--> before_provider_headers
+  |      +--> before_provider_request
+  |      +--> after_provider_response
+  |      |
+  |      +--> tool_execution_start
+  |      +--> tool_call
+  |      +--> tool_execution_update
+  |      +--> tool_result
+  |      +--> tool_execution_end
+  |      |
+  |      +--> turn_end
+  |
+  +--> agent_end
+  +--> agent_before_settle
+  +--> agent_settled
+
+Session changes
+  |
+  +--> session_before_switch / session_before_fork
+  +--> session_shutdown
+  +--> session_start
+
+Compaction
+  |
+  +--> session_before_compact
+  +--> session_compact / session_compact_failed
+
+Model changes
+  |
+  +--> thinking_level_select
+  +--> model_select
+
+Application exit
+  |
+  +--> session_shutdown
+```
+
+The turn lifecycle can repeat when the model calls tools or
+continues processing. Events such as `tool_call` and `tool_result`
+allow extensions to intercept or modify tool behavior.
+
+Session events are triggered separately when users create,
+switch, fork, or compact sessions.
+
+This diagram summarizes the main lifecycle events. Not every
+event occurs during every run, and retries or recovery can
+start additional agent runs.
+
+### Example: Logging extension lifecycle events
+
+The following extension demonstrates how to register lifecycle
+event handlers and observe agent execution.
+
+Create an extension file named `lifecycle-logger.ts`:
+
+```typescript
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async (_event, ctx) => {
+    console.log(`[lifecycle] Session started in ${ctx.cwd}`);
+  });
+
+  pi.on("agent_start", async () => {
+    console.log("[lifecycle] Agent started");
+  });
+
+  pi.on("turn_start", async () => {
+    console.log("[lifecycle] Turn started");
+  });
+
+  pi.on("turn_end", async () => {
+    console.log("[lifecycle] Turn ended");
+  });
+
+  pi.on("agent_end", async () => {
+    console.log("[lifecycle] Agent ended");
+  });
+
+  pi.on("session_shutdown", async () => {
+    console.log("[lifecycle] Session shutting down");
+  });
+}
+```
+
+Load the extension using:
+
+```bash
+pi -e ./lifecycle-logger.ts
+```
+
+After submitting a prompt, the extension logs the lifecycle
+events triggered during the agent run. A single run can produce
+multiple `turn_start` and `turn_end` events.
+
+This example observes events without changing the agent's
+messages, tools, or execution flow.
+
+### Registering handlers and managing resources
+
+Use `pi.on(eventName, handler)` to register an event handler.
+The handler is called when Pi emits the corresponding event.
+
+An event handler can access event information and, where
+provided, the extension context.
+
+For resources such as timers, file watchers, or network
+connections, initialize them when the session starts and
+release them when the session shuts down.
+
+```typescript
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  pi.on("session_start", async () => {
+    if (timer) clearInterval(timer);
+
+    timer = setInterval(() => {
+      // Perform periodic work here.
+    }, 60_000);
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (timer) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+  });
+}
+```
+
+Cleanup should be safe to perform more than once because
+session changes, cancellation, and application shutdown
+may trigger overlapping cleanup paths.
+
+Avoid starting long-lived resources directly in the extension
+factory because extensions can be loaded without an active session.
+
+### Common extension lifecycle events
+
+Extensions can subscribe to lifecycle events using `pi.on()`.
+These hooks allow extensions to respond to session changes,
+agent execution, tool calls, and application shutdown.
+
+| Event | When it occurs | Common use |
+|---|---|---|
+| `session_start` | When a session starts | Initialize session resources |
+| `resources_discover` | When Pi discovers extension resources | Contribute discovered resources |
+| `input` | When user input is processed | Inspect or transform input |
+| `before_agent_start` | Before an agent run begins | Prepare context for the agent |
+| `agent_start` | When an agent run starts | Track agent execution |
+| `turn_start` | At the beginning of an agent turn | Track individual turns |
+| `tool_call` | Before a tool executes | Inspect or block tool calls |
+| `tool_result` | When a tool result is available | Inspect or modify tool results |
+| `turn_end` | At the end of an agent turn | Collect turn information |
+| `agent_end` | When an agent run ends | Handle run completion |
+| `agent_before_settle` | Before the agent settles | Perform final actionable work |
+| `agent_settled` | When the agent is fully settled | Notify external integrations |
+| `session_shutdown` | When a session shuts down | Release session resources |
+
+Not all events occur during every interaction. For example,
+tool events occur only when tools are used, and a single agent
+run may contain multiple turns.
+
+See the event types in
+[`extensions/types.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts)
+for the complete event definitions.
+
 ## Choose an integration point
 
 | Capability | Main API |
