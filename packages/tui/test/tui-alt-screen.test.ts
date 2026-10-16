@@ -1540,10 +1540,11 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("coalesces slash and hyphen separated segments for double-click word selection", async () => {
+	it("coalesces slash, hyphen, and tilde separated segments for double-click word selection", async () => {
 		for (const { line, needle } of [
 			{ line: "extensions/starline/fixed-editor/compositor.ts", needle: "starline" },
 			{ line: "earendil-works/pi-tui", needle: "works" },
+			{ line: "~/Downloads/WSU_Classes/Fall2026/cpts481/pi", needle: "Downloads" },
 		]) {
 			const copied: string[] = [];
 			const terminal = new RecordingTerminal(80, 1);
