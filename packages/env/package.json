@@ -49,6 +49,7 @@
 		"@earendil-works/pi-durable": "1.5.2"
 	},
 	"devDependencies": {
+		"@babel/preset-typescript": "8.0.7",
 		"vitest": "4.1.12"
 	}
 }

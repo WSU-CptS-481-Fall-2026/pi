@@ -958,7 +958,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 						? stopped()
 						: error.code === "shell_unavailable" || error.code === "spawn_error"
 							? new ExecutionError(error.code, error.message)
-							: new ExecutionError("unknown", error.message);
+							: new ExecutionError("unknown", error.message, error);
 			if (typeof error.fields.spillPath === "string") failure.spillPath = error.fields.spillPath;
 			return err(failure);
 		} finally {

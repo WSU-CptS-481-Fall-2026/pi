@@ -62,7 +62,8 @@ export function getCurrentTools(messages: TranscriptMessages): Tool[] {
 		for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
 		for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
 	}
-	return [...tools.values()];
+	// Sort tools by name before returning
+	return [...tools.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
