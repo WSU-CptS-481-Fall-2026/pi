@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { type Dirent, existsSync, readdirSync, readFileSync, type Stats, statSync } from "fs";
 import ignore from "ignore";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
@@ -166,182 +166,143 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
  * - recurse into subdirectories to find SKILL.md
  */
 export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkillsResult {
-	const { dir, source } = options;
-	return loadSkillsFromDirInternal(dir, source, true);
+	const result: LoadSkillsResult = { skills: [], diagnostics: [] };
+	if (existsSync(options.dir)) {
+		scanDirectory(options.dir, { source: options.source, rootDir: options.dir, ignoreMatcher: ignore() }, result);
+	}
+	return result;
 }
 
-function loadSkillsFromDirInternal(
-	dir: string,
-	source: string,
-	includeRootFiles: boolean,
-	ignoreMatcher?: IgnoreMatcher,
-	rootDir?: string,
-): LoadSkillsResult {
-	const skills: Skill[] = [];
-	const diagnostics: ResourceDiagnostic[] = [];
+interface SkillScan {
+	source: string;
+	rootDir: string;
+	ignoreMatcher: IgnoreMatcher;
+}
 
-	if (!existsSync(dir)) {
-		return { skills, diagnostics };
+type EntryKind = "file" | "directory" | "other";
+
+function scanDirectory(dir: string, scan: SkillScan, result: LoadSkillsResult): void {
+	addIgnoreRules(scan.ignoreMatcher, dir, scan.rootDir);
+
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return;
 	}
 
-	const root = rootDir ?? dir;
-	const ig = ignoreMatcher ?? ignore();
-	addIgnoreRules(ig, dir, root);
+	const skillFile = findSkillFile(dir, entries, scan);
+	if (skillFile) {
+		appendResult(result, loadSkillFromFile(skillFile, scan.source));
+		return;
+	}
 
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			if (entry.name !== "SKILL.md") {
-				continue;
-			}
-
-			const fullPath = join(dir, entry.name);
-
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(root, fullPath));
-			if (!isFile || ig.ignores(relPath)) {
-				continue;
-			}
-
-			const result = loadSkillFromFile(fullPath, source);
-			if (result.skill) {
-				skills.push(result.skill);
-			}
-			diagnostics.push(...result.diagnostics);
-			return { skills, diagnostics };
-		}
-
-		for (const entry of entries) {
-			if (entry.name.startsWith(".")) {
-				continue;
-			}
-
-			// Skip node_modules to avoid scanning dependencies
-			if (entry.name === "node_modules") {
-				continue;
-			}
-
-			const fullPath = join(dir, entry.name);
-
-			// For symlinks, check if they point to a directory and follow them
-			let isDirectory = entry.isDirectory();
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isDirectory = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					// Broken symlink, skip it
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(root, fullPath));
-			const ignorePath = isDirectory ? `${relPath}/` : relPath;
-			if (ig.ignores(ignorePath)) {
-				continue;
-			}
-
-			if (isDirectory) {
-				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root);
-				skills.push(...subResult.skills);
-				diagnostics.push(...subResult.diagnostics);
-				continue;
-			}
-
-			if (!isFile || !includeRootFiles || !entry.name.endsWith(".md")) {
-				continue;
-			}
-
-			const result = loadSkillFromFile(fullPath, source);
-			if (result.skill) {
-				skills.push(result.skill);
-			}
-			diagnostics.push(...result.diagnostics);
-		}
-	} catch {}
-
-	return { skills, diagnostics };
+	for (const entry of entries) {
+		scanEntry(dir, entry, scan, result);
+	}
 }
 
-function loadSkillFromFile(
-	filePath: string,
-	source: string,
-): { skill: Skill | null; diagnostics: ResourceDiagnostic[] } {
-	const diagnostics: ResourceDiagnostic[] = [];
-	const isDeclaredSkill = basename(filePath) === "SKILL.md";
+function findSkillFile(dir: string, entries: Dirent[], scan: SkillScan): string | undefined {
+	const entry = entries.find((candidate) => candidate.name === "SKILL.md");
+	if (!entry) return undefined;
+	const filePath = join(dir, entry.name);
+	if (resolveEntryKind(entry, filePath) !== "file" || isIgnored(scan, filePath, "file")) return undefined;
+	return filePath;
+}
 
+function scanEntry(dir: string, entry: Dirent, scan: SkillScan, result: LoadSkillsResult): void {
+	// Skip node_modules to avoid scanning dependencies
+	if (entry.name.startsWith(".") || entry.name === "node_modules") return;
+
+	const fullPath = join(dir, entry.name);
+	const kind = resolveEntryKind(entry, fullPath);
+	if (!kind || isIgnored(scan, fullPath, kind)) return;
+
+	if (kind === "directory") {
+		scanDirectory(fullPath, scan, result);
+	} else if (kind === "file" && dir === scan.rootDir && entry.name.endsWith(".md")) {
+		appendResult(result, loadSkillFromFile(fullPath, scan.source));
+	}
+}
+
+function resolveEntryKind(entry: Dirent, fullPath: string): EntryKind | undefined {
+	if (!entry.isSymbolicLink()) return kindOf(entry);
+	try {
+		return kindOf(statSync(fullPath));
+	} catch {
+		return undefined;
+	}
+}
+
+function kindOf(stats: Dirent | Stats): EntryKind {
+	if (stats.isDirectory()) return "directory";
+	return stats.isFile() ? "file" : "other";
+}
+
+function isIgnored(scan: SkillScan, fullPath: string, kind: EntryKind): boolean {
+	const relPath = toPosixPath(relative(scan.rootDir, fullPath));
+	return scan.ignoreMatcher.ignores(kind === "directory" ? `${relPath}/` : relPath);
+}
+
+function appendResult(target: LoadSkillsResult, source: LoadSkillsResult): void {
+	target.skills.push(...source.skills);
+	target.diagnostics.push(...source.diagnostics);
+}
+
+type FrontmatterRead = { ok: true; frontmatter: SkillFrontmatter } | { ok: false; diagnostics: ResourceDiagnostic[] };
+
+function loadSkillFromFile(filePath: string, source: string): LoadSkillsResult {
+	const isDeclaredSkill = basename(filePath) === "SKILL.md";
+	const read = readSkillFrontmatter(filePath, isDeclaredSkill);
+	if (!read.ok) return { skills: [], diagnostics: read.diagnostics };
+
+	const { frontmatter } = read;
+	const description = frontmatter.description;
+	const hasDescription = typeof description === "string" && description.trim() !== "";
+	if (!isDeclaredSkill && !hasDescription) return { skills: [], diagnostics: [] };
+
+	const baseDir = dirname(filePath);
+	const name = (typeof frontmatter.name === "string" && frontmatter.name) || basename(baseDir);
+	const diagnostics = [...validateDescription(description), ...validateName(name)].map((message) =>
+		warning(message, filePath),
+	);
+
+	// Still load the skill even with warnings, unless description is missing or empty.
+	if (!hasDescription) return { skills: [], diagnostics };
+
+	const skill: Skill = {
+		name,
+		description,
+		filePath,
+		baseDir,
+		sourceInfo: createSkillSourceInfo(filePath, baseDir, source),
+		disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+	};
+	return { skills: [skill], diagnostics };
+}
+
+function readSkillFrontmatter(filePath: string, isDeclaredSkill: boolean): FrontmatterRead {
 	let rawContent: string;
 	try {
 		rawContent = readFileSync(filePath, "utf-8");
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "failed to read skill file";
-		diagnostics.push({ type: "warning", message, path: filePath });
-		return { skill: null, diagnostics };
+		return { ok: false, diagnostics: [errorWarning(error, "failed to read skill file", filePath)] };
 	}
 
-	let frontmatter: SkillFrontmatter;
 	try {
-		({ frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent));
+		return { ok: true, frontmatter: parseFrontmatter<SkillFrontmatter>(rawContent).frontmatter };
 	} catch (error) {
-		if (isDeclaredSkill) {
-			const message = error instanceof Error ? error.message : "failed to parse skill file";
-			diagnostics.push({ type: "warning", message, path: filePath });
-		}
-		return { skill: null, diagnostics };
+		const diagnostics = isDeclaredSkill ? [errorWarning(error, "failed to parse skill file", filePath)] : [];
+		return { ok: false, diagnostics };
 	}
+}
 
-	const description = frontmatter.description;
-	const hasDescription = typeof description === "string" && description.trim() !== "";
-	if (!isDeclaredSkill && !hasDescription) {
-		return { skill: null, diagnostics };
-	}
+function warning(message: string, path: string): ResourceDiagnostic {
+	return { type: "warning", message, path };
+}
 
-	const skillDir = dirname(filePath);
-	const parentDirName = basename(skillDir);
-
-	// Validate description
-	const descErrors = validateDescription(description);
-	for (const error of descErrors) {
-		diagnostics.push({ type: "warning", message: error, path: filePath });
-	}
-
-	// Use name from frontmatter, or fall back to parent directory name
-	const frontmatterName = typeof frontmatter.name === "string" ? frontmatter.name : undefined;
-	const name = frontmatterName || parentDirName;
-
-	// Validate name
-	const nameErrors = validateName(name);
-	for (const error of nameErrors) {
-		diagnostics.push({ type: "warning", message: error, path: filePath });
-	}
-
-	// Still load the skill even with warnings, unless description is missing or empty.
-	if (!hasDescription) {
-		return { skill: null, diagnostics };
-	}
-
-	return {
-		skill: {
-			name,
-			description,
-			filePath,
-			baseDir: skillDir,
-			sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
-			disableModelInvocation: frontmatter["disable-model-invocation"] === true,
-		},
-		diagnostics,
-	};
+function errorWarning(error: unknown, fallback: string, path: string): ResourceDiagnostic {
+	return warning(error instanceof Error ? error.message : fallback, path);
 }
 
 /**
@@ -412,94 +373,97 @@ export interface LoadSkillsOptions {
  * Returns skills and any validation diagnostics.
  */
 export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
-	const { agentDir, skillPaths, includeDefaults } = options;
-
-	// Resolve agentDir - if not provided, use default from config
 	const resolvedCwd = resolvePath(options.cwd);
-	const resolvedAgentDir = resolvePath(agentDir ?? getAgentDir());
-
-	const skillMap = new Map<string, Skill>();
-	const realPathSet = new Set<string>();
-	const allDiagnostics: ResourceDiagnostic[] = [];
-	const collisionDiagnostics: ResourceDiagnostic[] = [];
-
-	function addSkills(result: LoadSkillsResult) {
-		allDiagnostics.push(...result.diagnostics);
-		for (const skill of result.skills) {
-			// Resolve symlinks to detect duplicate files
-			const realPath = getResourcePathKey(skill.filePath);
-
-			// Skip silently if we've already loaded this exact file (via symlink)
-			if (realPathSet.has(realPath)) {
-				continue;
-			}
-
-			const existing = skillMap.get(skill.name);
-			if (existing) {
-				collisionDiagnostics.push({
-					type: "collision",
-					message: `name "${skill.name}" collision`,
-					path: skill.filePath,
-					collision: {
-						resourceType: "skill",
-						name: skill.name,
-						winnerPath: existing.filePath,
-						loserPath: skill.filePath,
-					},
-				});
-			} else {
-				skillMap.set(skill.name, skill);
-				realPathSet.add(realPath);
-			}
-		}
-	}
-
-	if (includeDefaults) {
-		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
-		addSkills(loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", true));
-	}
-
+	const resolvedAgentDir = resolvePath(options.agentDir ?? getAgentDir());
 	const userSkillsDir = join(resolvedAgentDir, "skills");
 	const projectSkillsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "skills");
+	const collector = new SkillCollector();
 
-	const getSource = (resolvedPath: string): "user" | "project" | "path" => {
-		if (!includeDefaults) {
-			if (isPathWithin(userSkillsDir, resolvedPath)) return "user";
-			if (isPathWithin(projectSkillsDir, resolvedPath)) return "project";
-		}
-		return "path";
-	};
+	if (options.includeDefaults) {
+		collector.add(loadSkillsFromDir({ dir: userSkillsDir, source: "user" }));
+		collector.add(loadSkillsFromDir({ dir: projectSkillsDir, source: "project" }));
+	}
 
-	for (const rawPath of skillPaths) {
+	for (const rawPath of options.skillPaths) {
 		const resolvedPath = resolvePath(rawPath, resolvedCwd, { trim: true });
-		if (!existsSync(resolvedPath)) {
-			allDiagnostics.push({ type: "warning", message: "skill path does not exist", path: resolvedPath });
-			continue;
-		}
+		const source = options.includeDefaults
+			? "path"
+			: classifySkillPath(resolvedPath, userSkillsDir, projectSkillsDir);
+		collector.add(loadSkillPath(resolvedPath, source));
+	}
 
-		try {
-			const stats = statSync(resolvedPath);
-			const source = getSource(resolvedPath);
-			if (stats.isDirectory()) {
-				addSkills(loadSkillsFromDirInternal(resolvedPath, source, true));
-			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
-				const result = loadSkillFromFile(resolvedPath, source);
-				if (result.skill) {
-					addSkills({ skills: [result.skill], diagnostics: result.diagnostics });
-				} else {
-					allDiagnostics.push(...result.diagnostics);
-				}
-			} else {
-				allDiagnostics.push({ type: "warning", message: "skill path is not a markdown file", path: resolvedPath });
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "failed to read skill path";
-			allDiagnostics.push({ type: "warning", message, path: resolvedPath });
+	return collector.result();
+}
+
+function classifySkillPath(
+	resolvedPath: string,
+	userSkillsDir: string,
+	projectSkillsDir: string,
+): "user" | "project" | "path" {
+	if (isPathWithin(userSkillsDir, resolvedPath)) return "user";
+	if (isPathWithin(projectSkillsDir, resolvedPath)) return "project";
+	return "path";
+}
+
+function loadSkillPath(resolvedPath: string, source: string): LoadSkillsResult {
+	if (!existsSync(resolvedPath)) {
+		return { skills: [], diagnostics: [warning("skill path does not exist", resolvedPath)] };
+	}
+
+	let stats: Stats;
+	try {
+		stats = statSync(resolvedPath);
+	} catch (error) {
+		return { skills: [], diagnostics: [errorWarning(error, "failed to read skill path", resolvedPath)] };
+	}
+
+	if (stats.isDirectory()) return loadSkillsFromDir({ dir: resolvedPath, source });
+	if (stats.isFile() && resolvedPath.endsWith(".md")) return loadSkillFromFile(resolvedPath, source);
+	return { skills: [], diagnostics: [warning("skill path is not a markdown file", resolvedPath)] };
+}
+
+class SkillCollector {
+	private readonly skillsByName = new Map<string, Skill>();
+	private readonly loadedPathKeys = new Set<string>();
+	private readonly diagnostics: ResourceDiagnostic[] = [];
+	private readonly collisions: ResourceDiagnostic[] = [];
+
+	add(result: LoadSkillsResult): void {
+		this.diagnostics.push(...result.diagnostics);
+		for (const skill of result.skills) {
+			this.addSkill(skill);
 		}
 	}
 
-	return {
-		skills: Array.from(skillMap.values()),
-		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
-	};
+	result(): LoadSkillsResult {
+		return {
+			skills: Array.from(this.skillsByName.values()),
+			diagnostics: [...this.diagnostics, ...this.collisions],
+		};
+	}
+
+	private addSkill(skill: Skill): void {
+		// Skip silently if we've already loaded this exact file (via symlink)
+		const pathKey = getResourcePathKey(skill.filePath);
+		if (this.loadedPathKeys.has(pathKey)) return;
+
+		const existing = this.skillsByName.get(skill.name);
+		if (existing) {
+			this.collisions.push({
+				type: "collision",
+				message: `name "${skill.name}" collision`,
+				path: skill.filePath,
+				collision: {
+					resourceType: "skill",
+					name: skill.name,
+					winnerPath: existing.filePath,
+					loserPath: skill.filePath,
+				},
+			});
+			return;
+		}
+
+		this.skillsByName.set(skill.name, skill);
+		this.loadedPathKeys.add(pathKey);
+	}
 }
