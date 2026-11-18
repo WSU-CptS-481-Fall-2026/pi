@@ -56,11 +56,20 @@ Set `disable-model-invocation: true` in frontmatter when a skill should be avail
 
 ## Add it to Pi
 
-Place the skill in your user or project skills directory. Directories containing `SKILL.md` are discovered recursively.
+Place the skill in your user or project skills directory. Pi scans each skills directory with these rules:
+
+- A directory containing `SKILL.md` is one skill. Pi does not look for more skills inside it.
+- Other directories are searched recursively for `SKILL.md`.
+- Markdown files directly inside the scanned directory load as standalone skills when their frontmatter has a description. Deeper Markdown files load only when named `SKILL.md`.
+- Files and directories whose names start with `.`, and `node_modules` directories, are skipped.
+- Symbolic links to files and directories are followed. Broken links are skipped.
+- Paths matched by a `.gitignore`, `.ignore`, or `.fdignore` file in the scanned tree are skipped. Patterns in a nested ignore file apply only within its directory.
+
+A skill reached through more than one path, such as a directory and a symbolic link to it, loads once.
 
 Pi also supports the Agent Skills locations `~/.agents/skills/` and `.agents/skills/`. Project `.agents/skills/` directories are discovered from the working directory through its ancestors, stopping at the repository root when one exists.
 
-Pi accepts some standalone Markdown skills, but a directory containing `SKILL.md` is the portable form and should be preferred. See [Settings](settings.md#resources) and [Pi Packages](packages.md) for additional locations.
+Standalone Markdown skills work, but a directory containing `SKILL.md` is the portable form and should be preferred. See [Settings](settings.md#resources) and [Pi Packages](packages.md) for additional locations.
 
 Project skills can instruct the model to run scripts or modify files. Review unfamiliar skills and their supporting files before granting project trust.
 
@@ -80,7 +89,7 @@ The Agent Skills specification defines these fields:
 
 Names use lowercase letters, numbers, and hyphens, with no leading, trailing, or consecutive hyphens. They can contain at most 64 characters; descriptions can contain at most 1024.
 
-Pi neither requires nor warns when the declared name differs from the parent directory. Other Agent Skills implementations may enforce that requirement, so matching names remain the portable choice.
+When `name` is omitted, Pi uses the parent directory name. Pi neither requires nor warns when the declared name differs from the parent directory. Other Agent Skills implementations may enforce that requirement, so matching names remain the portable choice.
 
 Malformed `SKILL.md` files and declared skills without descriptions are not loaded. Name collisions keep the first discovered skill and produce a warning.
 
