@@ -19,6 +19,11 @@ export interface PathInputOptions {
 	normalizeUnicodeSpaces?: boolean;
 }
 
+/** Convert a platform path to use `/` separators, as ignore patterns and globs expect. */
+export function toPosixPath(path: string): string {
+	return path.split(sep).join("/");
+}
+
 /**
  * Resolve a path to its canonical (real) form, following symlinks.
  * Falls back to the raw path if resolution fails (e.g. the target does
