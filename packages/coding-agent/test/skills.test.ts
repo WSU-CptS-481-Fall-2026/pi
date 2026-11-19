@@ -385,6 +385,19 @@ describe("skills", () => {
 			expect(skillNames(skills)).toEqual(["comment-skill"]);
 		});
 
+		it("should match escaped exclamation names instead of negating them", () => {
+			writeSkillFile(join(root, "!bang", "SKILL.md"), "name: bang\ndescription: Dropped.");
+			writeSkillFile(join(root, "group", "!bang", "SKILL.md"), "name: group-bang\ndescription: Dropped.");
+			writeSkillFile(join(root, "group", "#hash", "SKILL.md"), "name: group-hash\ndescription: Dropped.");
+			writeSkillFile(join(root, "kept", "SKILL.md"), "name: kept\ndescription: Kept.");
+			writeFileSync(join(root, ".gitignore"), "\\!bang\n");
+			writeFileSync(join(root, "group", ".gitignore"), "\\!bang\n\\#hash\n");
+
+			const { skills } = loadSkillsFromDir({ dir: root, source: "test" });
+
+			expect(skillNames(skills)).toEqual(["kept"]);
+		});
+
 		it("should scope nested ignore files to their directory", () => {
 			writeSkillFile(join(root, "group", "drop", "SKILL.md"), "name: group-drop\ndescription: Dropped.");
 			writeSkillFile(join(root, "group", "keep", "SKILL.md"), "name: group-keep\ndescription: Kept.");

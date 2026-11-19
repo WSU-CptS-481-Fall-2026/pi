@@ -40,8 +40,6 @@ function prefixIgnorePattern(line: string, prefix: string): string | null {
 	if (pattern.startsWith("!")) {
 		negated = true;
 		pattern = pattern.slice(1);
-	} else if (pattern.startsWith("\\!")) {
-		pattern = pattern.slice(1);
 	}
 
 	if (pattern.startsWith("/")) {
