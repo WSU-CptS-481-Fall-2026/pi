@@ -8,17 +8,18 @@
  * - Edge cases and integration between parsing and substitution
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
-import { afterAll, describe, expect, test } from "vitest";
-import { getAgentDir } from "../src/config.ts";
+import { dirname, join } from "path";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "vitest";
+import { CONFIG_DIR_NAME, getAgentDir } from "../src/config.ts";
 import {
 	expandPromptTemplate,
 	loadPromptTemplates,
 	parseCommandArgs,
 	substituteArgs,
 } from "../src/core/prompt-templates.ts";
+import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
 // ============================================================================
 // substituteArgs
@@ -698,5 +699,166 @@ describe("loadPromptTemplates - diagnostics", () => {
 		} finally {
 			rmSync(testDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("loadPromptTemplates - sources and paths", () => {
+	let baseDir: string;
+	let agentDir: string;
+	let cwd: string;
+
+	beforeEach(() => {
+		baseDir = mkdtempSync(join(tmpdir(), "pi-test-prompts-sources-"));
+		agentDir = join(baseDir, "agent");
+		cwd = join(baseDir, "project");
+		mkdirSync(agentDir);
+		mkdirSync(cwd);
+	});
+
+	afterEach(() => {
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	function writePrompt(filePath: string, content = "Prompt body."): string {
+		mkdirSync(dirname(filePath), { recursive: true });
+		writeFileSync(filePath, content);
+		return filePath;
+	}
+
+	test("loads default directories with user and project scopes", () => {
+		const userDir = join(agentDir, "prompts");
+		const projectDir = join(cwd, CONFIG_DIR_NAME, "prompts");
+		writePrompt(join(userDir, "user-prompt.md"));
+		writePrompt(join(projectDir, "project-prompt.md"));
+
+		const { templates, diagnostics } = loadPromptTemplates({ cwd, agentDir, promptPaths: [], includeDefaults: true });
+
+		expect(templates.map((t) => [t.name, t.sourceInfo.scope, t.sourceInfo.baseDir])).toEqual([
+			["user-prompt", "user", userDir],
+			["project-prompt", "project", projectDir],
+		]);
+		expect(diagnostics).toEqual([]);
+	});
+
+	test("classifies explicit paths inside the default directories when defaults are off", () => {
+		const userPrompt = writePrompt(join(agentDir, "prompts", "user-prompt.md"));
+		const projectPrompt = writePrompt(join(cwd, CONFIG_DIR_NAME, "prompts", "project-prompt.md"));
+
+		const { templates } = loadPromptTemplates({
+			cwd,
+			agentDir,
+			promptPaths: [userPrompt, projectPrompt],
+			includeDefaults: false,
+		});
+
+		expect(templates.map((t) => t.sourceInfo.scope)).toEqual(["user", "project"]);
+	});
+
+	test("loads a single file path and silently skips missing and non-markdown paths", () => {
+		const promptFile = writePrompt(join(baseDir, "single.md"));
+		const textFile = writePrompt(join(baseDir, "notes.txt"));
+
+		const { templates, diagnostics } = loadPromptTemplates({
+			cwd,
+			agentDir,
+			promptPaths: [join(baseDir, "missing.md"), textFile, promptFile],
+			includeDefaults: false,
+		});
+
+		expect(templates.map((t) => t.name)).toEqual(["single"]);
+		expect(templates[0].sourceInfo).toMatchObject({ source: "local", scope: "temporary", baseDir });
+		expect(diagnostics).toEqual([]);
+	});
+
+	test("loads only direct markdown children of a directory", () => {
+		const dir = join(baseDir, "prompts");
+		writePrompt(join(dir, "top.md"));
+		writePrompt(join(dir, "nested", "deep.md"));
+		writePrompt(join(dir, "readme.txt"));
+
+		const { templates } = loadPromptTemplates({ cwd, agentDir, promptPaths: [dir], includeDefaults: false });
+
+		expect(templates.map((t) => t.name)).toEqual(["top"]);
+		expect(templates[0].sourceInfo.baseDir).toBe(dir);
+	});
+
+	test("follows symlinked files and skips broken symlinks", () => {
+		const dir = join(baseDir, "prompts");
+		mkdirSync(dir);
+		const target = writePrompt(join(baseDir, "targets", "real.md"));
+		symlinkSync(target, join(dir, "linked.md"));
+		symlinkSync(join(baseDir, "missing.md"), join(dir, "broken.md"));
+
+		const { templates, diagnostics } = loadPromptTemplates({
+			cwd,
+			agentDir,
+			promptPaths: [dir],
+			includeDefaults: false,
+		});
+
+		expect(templates.map((t) => t.name)).toEqual(["linked"]);
+		expect(diagnostics).toEqual([]);
+	});
+
+	test("derives the description from the first non-empty line, truncated to 60 characters", () => {
+		const dir = join(baseDir, "prompts");
+		writePrompt(join(dir, "short.md"), `\n\n${"a".repeat(60)}\nsecond line`);
+		writePrompt(join(dir, "long.md"), "b".repeat(61));
+		writePrompt(join(dir, "empty.md"), "\n  \n");
+
+		const { templates } = loadPromptTemplates({ cwd, agentDir, promptPaths: [dir], includeDefaults: false });
+		const descriptions = Object.fromEntries(templates.map((t) => [t.name, t.description]));
+
+		expect(descriptions).toEqual({ short: "a".repeat(60), long: `${"b".repeat(60)}...`, empty: "" });
+	});
+
+	test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"warns about unreadable files and skips unreadable directories",
+		() => {
+			const lockedFile = writePrompt(join(baseDir, "prompts", "locked.md"));
+			chmodSync(lockedFile, 0o000);
+			const lockedDir = join(baseDir, "locked-dir");
+			writePrompt(join(lockedDir, "hidden.md"));
+			chmodSync(lockedDir, 0o000);
+
+			try {
+				const { templates, diagnostics } = loadPromptTemplates({
+					cwd,
+					agentDir,
+					promptPaths: [join(baseDir, "prompts"), lockedDir],
+					includeDefaults: false,
+				});
+
+				expect(templates).toEqual([]);
+				expect(diagnostics).toEqual([
+					expect.objectContaining({
+						type: "warning",
+						path: lockedFile,
+						message: expect.stringContaining("EACCES"),
+					}),
+				]);
+			} finally {
+				chmodSync(lockedDir, 0o700);
+			}
+		},
+	);
+});
+
+describe("expandPromptTemplate - non-matching input", () => {
+	const templates = [
+		{
+			name: "greet",
+			description: "",
+			content: "Hello $1",
+			sourceInfo: createSyntheticSourceInfo("/greet.md", { source: "test" }),
+			filePath: "/greet.md",
+		},
+	];
+
+	test("returns the input unchanged when it names no template or has no name", () => {
+		expect(expandPromptTemplate("/unknown world", templates)).toBe("/unknown world");
+		expect(expandPromptTemplate("/", templates)).toBe("/");
+		expect(expandPromptTemplate("/ greet", templates)).toBe("/ greet");
+		expect(expandPromptTemplate("/greet world", templates)).toBe("Hello world");
 	});
 });
