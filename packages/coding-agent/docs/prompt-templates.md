@@ -16,7 +16,7 @@ argument-hint: "[focus]"
 Review the staged changes. Focus on ${1:-correctness, security, and error handling}.
 ```
 
-The filename becomes the command name, so this template is available as `/review`. The `description` appears in command completion. If it is omitted, Pi uses the first non-empty line.
+The filename becomes the command name, so this template is available as `/review`. The `description` appears in command completion. If it is omitted, Pi uses the first non-empty line, shortened to 60 characters followed by `...` when it is longer.
 
 `argument-hint` is optional. Use `<angle brackets>` for required arguments and `[square brackets]` for optional arguments.
 
@@ -53,6 +53,8 @@ Arguments follow shell-like quoting, so `/review "API compatibility"` supplies o
 ## Add it to Pi
 
 Place the template in your user or project prompt directory. Conventional prompt directories load direct `.md` children only.
+
+An explicit prompt path can name a directory, which loads its direct `.md` children the same way, or a single `.md` file. Paths that do not exist or are not Markdown are skipped without a warning. Symbolic links to files are followed and broken links are skipped. A template file that cannot be read or has invalid frontmatter is skipped with a startup warning, and the other templates still load.
 
 Settings and packages can select nested Markdown files; a package manifest can narrow discovery with explicit paths and globs. See [Settings](settings.md#resources) and [Pi Packages](packages.md) for these options.
 
