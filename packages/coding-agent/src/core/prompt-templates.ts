@@ -1,8 +1,8 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
-import { basename, dirname, join, resolve, sep } from "path";
+import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { basename, dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
-import { resolvePath } from "../utils/paths.ts";
+import { isPathWithin, resolvePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
@@ -27,28 +27,21 @@ export function parseCommandArgs(argsString: string): string[] {
 	let current = "";
 	// Tracks whether a token has started, so quoted empty strings ("" or '') are kept as arguments
 	let hasToken = false;
-	let inQuote: string | null = null;
-	// Where the open quote started, so an unclosed quote can be re-read as literal text
-	let quoteStart = 0;
 
 	for (let i = 0; i < argsString.length; i++) {
 		const char = argsString[i];
 
-		if (inQuote) {
-			if (char === "\\" && argsString[i + 1] === inQuote) {
-				// A backslash before the open quote's character keeps it as text: "say \"hi\"" gives say "hi"
-				current += inQuote;
-				i++;
-			} else if (char === inQuote) {
-				inQuote = null;
-			} else {
-				current += char;
-			}
-		} else if ((char === '"' || char === "'") && !hasToken) {
+		if ((char === '"' || char === "'") && !hasToken) {
 			// Quotes only open at the start of an argument, so apostrophes inside words stay literal
-			inQuote = char;
-			quoteStart = i;
 			hasToken = true;
+			const quoted = readQuotedArg(argsString, i);
+			if (quoted) {
+				current = quoted.value;
+				i = quoted.end;
+			} else {
+				// Unclosed quote: keep the quote character as text and parse the rest normally
+				current = char;
+			}
 		} else if (/\s/.test(char)) {
 			if (hasToken) {
 				args.push(current);
@@ -59,14 +52,6 @@ export function parseCommandArgs(argsString: string): string[] {
 			current += char;
 			hasToken = true;
 		}
-
-		if (inQuote && i === argsString.length - 1) {
-			// Unclosed quote: keep the quote character as text and parse the rest normally
-			// (current was empty when the quote opened, because quotes only open a new argument)
-			inQuote = null;
-			current = argsString[quoteStart];
-			i = quoteStart;
-		}
 	}
 
 	if (hasToken) {
@@ -74,6 +59,28 @@ export function parseCommandArgs(argsString: string): string[] {
 	}
 
 	return args;
+}
+
+/**
+ * Read the quoted string whose open quote is at `start`. Returns its text and the index of the
+ * closing quote, or undefined when the quote is never closed.
+ */
+function readQuotedArg(argsString: string, start: number): { value: string; end: number } | undefined {
+	const quote = argsString[start];
+	let value = "";
+	for (let i = start + 1; i < argsString.length; i++) {
+		const char = argsString[i];
+		if (char === "\\" && argsString[i + 1] === quote) {
+			// A backslash before the open quote's character keeps it as text: "say \"hi\"" gives say "hi"
+			value += quote;
+			i++;
+		} else if (char === quote) {
+			return { value, end: i };
+		} else {
+			value += char;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -95,46 +102,32 @@ export function substituteArgs(content: string, args: string[]): string {
 	return content.replace(
 		/\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)/g,
 		(_match, defaultTarget, defaultValue, sliceStart, sliceLength, simple) => {
-			if (defaultTarget) {
-				const value =
-					defaultTarget === "@" || defaultTarget === "ARGUMENTS" ? allArgs : args[parseInt(defaultTarget, 10) - 1];
-				return value ? value : defaultValue;
-			}
-
-			if (sliceStart) {
-				let start = parseInt(sliceStart, 10) - 1; // Convert to 0-indexed (user provides 1-indexed)
-				// Treat 0 as 1 (bash convention: args start at 1)
-				if (start < 0) start = 0;
-
-				if (sliceLength) {
-					const length = parseInt(sliceLength, 10);
-					return args.slice(start, start + length).join(" ");
-				}
-				return args.slice(start).join(" ");
-			}
-
-			if (simple === "ARGUMENTS" || simple === "@") {
-				return allArgs;
-			}
-
-			const index = parseInt(simple, 10) - 1;
-			return args[index] ?? "";
+			if (defaultTarget) return resolveArg(defaultTarget, args, allArgs) || defaultValue;
+			if (sliceStart) return sliceArgs(args, sliceStart, sliceLength);
+			return resolveArg(simple, args, allArgs) ?? "";
 		},
 	);
 }
 
-function loadTemplateFromFile(
-	filePath: string,
-	sourceInfo: SourceInfo,
-): { template: PromptTemplate | null; diagnostics: ResourceDiagnostic[] } {
-	const diagnostics: ResourceDiagnostic[] = [];
+/** Value of `@` or `ARGUMENTS` (all args joined), or of the 1-based positional arg `target`. */
+function resolveArg(target: string, args: string[], allArgs: string): string | undefined {
+	return target === "@" || target === "ARGUMENTS" ? allArgs : args[parseInt(target, 10) - 1];
+}
+
+/** Bash-style `${@:N}` and `${@:N:L}`: args from 1-based position N, optionally only L of them. */
+function sliceArgs(args: string[], sliceStart: string, sliceLength: string | undefined): string {
+	// Convert to 0-indexed (user provides 1-indexed); treat 0 as 1 (bash convention: args start at 1)
+	const start = Math.max(0, parseInt(sliceStart, 10) - 1);
+	const end = sliceLength ? start + parseInt(sliceLength, 10) : undefined;
+	return args.slice(start, end).join(" ");
+}
+
+function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): LoadPromptTemplatesResult {
 	let rawContent: string;
 	try {
 		rawContent = readFileSync(filePath, "utf-8");
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "failed to read prompt template file";
-		diagnostics.push({ type: "warning", message, path: filePath });
-		return { template: null, diagnostics };
+		return { templates: [], diagnostics: [errorWarning(error, "failed to read prompt template file", filePath)] };
 	}
 
 	let frontmatter: Record<string, unknown>;
@@ -142,80 +135,64 @@ function loadTemplateFromFile(
 	try {
 		({ frontmatter, body } = parseFrontmatter(rawContent));
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "failed to parse prompt template file";
-		diagnostics.push({ type: "warning", message, path: filePath });
-		return { template: null, diagnostics };
-	}
-
-	const name = basename(filePath).replace(/\.md$/, "");
-
-	// Get description from frontmatter or first non-empty line
-	let description = typeof frontmatter.description === "string" ? frontmatter.description : "";
-	if (!description) {
-		const firstLine = body.split("\n").find((line) => line.trim());
-		if (firstLine) {
-			// Truncate if too long
-			description = firstLine.slice(0, 60);
-			if (firstLine.length > 60) description += "...";
-		}
+		return { templates: [], diagnostics: [errorWarning(error, "failed to parse prompt template file", filePath)] };
 	}
 
 	const argumentHint = typeof frontmatter["argument-hint"] === "string" ? frontmatter["argument-hint"] : undefined;
-	return {
-		template: {
-			name,
-			description,
-			...(argumentHint && { argumentHint }),
-			content: body,
-			sourceInfo,
-			filePath,
-		},
-		diagnostics,
+	const template: PromptTemplate = {
+		name: basename(filePath).replace(/\.md$/, ""),
+		description: getTemplateDescription(frontmatter, body),
+		...(argumentHint && { argumentHint }),
+		content: body,
+		sourceInfo,
+		filePath,
 	};
+	return { templates: [template], diagnostics: [] };
+}
+
+/** The frontmatter description, or else the first non-empty body line truncated to 60 characters. */
+function getTemplateDescription(frontmatter: Record<string, unknown>, body: string): string {
+	if (typeof frontmatter.description === "string" && frontmatter.description) {
+		return frontmatter.description;
+	}
+	const firstLine = body.split("\n").find((line) => line.trim());
+	if (!firstLine) return "";
+	return firstLine.length > 60 ? `${firstLine.slice(0, 60)}...` : firstLine;
 }
 
 /**
  * Scan a directory for .md files (non-recursive) and load them as prompt templates.
  */
 function loadTemplatesFromDir(dir: string, getSourceInfo: (filePath: string) => SourceInfo): LoadPromptTemplatesResult {
-	const templates: PromptTemplate[] = [];
-	const diagnostics: ResourceDiagnostic[] = [];
-
+	const result: LoadPromptTemplatesResult = { templates: [], diagnostics: [] };
 	if (!existsSync(dir)) {
-		return { templates, diagnostics };
+		return result;
 	}
 
+	let entries: Dirent[];
 	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			const fullPath = join(dir, entry.name);
-
-			// For symlinks, check if they point to a file
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isFile = stats.isFile();
-				} catch {
-					// Broken symlink, skip it
-					continue;
-				}
-			}
-
-			if (isFile && entry.name.endsWith(".md")) {
-				const result = loadTemplateFromFile(fullPath, getSourceInfo(fullPath));
-				if (result.template) {
-					templates.push(result.template);
-				}
-				diagnostics.push(...result.diagnostics);
-			}
-		}
+		entries = readdirSync(dir, { withFileTypes: true });
 	} catch {
-		return { templates, diagnostics };
+		return result;
 	}
 
-	return { templates, diagnostics };
+	for (const entry of entries) {
+		const fullPath = join(dir, entry.name);
+		if (entry.name.endsWith(".md") && isFileOrLinkToFile(entry, fullPath)) {
+			appendResult(result, loadTemplateFromFile(fullPath, getSourceInfo(fullPath)));
+		}
+	}
+	return result;
+}
+
+/** Whether a directory entry is a file, following symlinks; broken symlinks are not. */
+function isFileOrLinkToFile(entry: Dirent, fullPath: string): boolean {
+	if (!entry.isSymbolicLink()) return entry.isFile();
+	try {
+		return statSync(fullPath).isFile();
+	} catch {
+		return false;
+	}
 }
 
 export interface LoadPromptTemplatesOptions {
@@ -242,80 +219,65 @@ export interface LoadPromptTemplatesResult {
  */
 export function loadPromptTemplates(options: LoadPromptTemplatesOptions): LoadPromptTemplatesResult {
 	const resolvedCwd = resolvePath(options.cwd);
-	const resolvedAgentDir = resolvePath(options.agentDir);
-	const promptPaths = options.promptPaths;
-	const includeDefaults = options.includeDefaults;
-
-	const templates: PromptTemplate[] = [];
-	const diagnostics: ResourceDiagnostic[] = [];
-	const addResult = (result: LoadPromptTemplatesResult): void => {
-		templates.push(...result.templates);
-		diagnostics.push(...result.diagnostics);
-	};
-
-	const globalPromptsDir = join(resolvedAgentDir, "prompts");
+	const globalPromptsDir = join(resolvePath(options.agentDir), "prompts");
 	const projectPromptsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "prompts");
+	const getSourceInfo = (resolvedPath: string): SourceInfo =>
+		getPromptSourceInfo(resolvedPath, globalPromptsDir, projectPromptsDir);
 
-	const isUnderPath = (target: string, root: string): boolean => {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	};
-
-	const getSourceInfo = (resolvedPath: string): SourceInfo => {
-		if (isUnderPath(resolvedPath, globalPromptsDir)) {
-			return createSyntheticSourceInfo(resolvedPath, {
-				source: "local",
-				scope: "user",
-				baseDir: globalPromptsDir,
-			});
-		}
-		if (isUnderPath(resolvedPath, projectPromptsDir)) {
-			return createSyntheticSourceInfo(resolvedPath, {
-				source: "local",
-				scope: "project",
-				baseDir: projectPromptsDir,
-			});
-		}
-		return createSyntheticSourceInfo(resolvedPath, {
-			source: "local",
-			baseDir: statSync(resolvedPath).isDirectory() ? resolvedPath : dirname(resolvedPath),
-		});
-	};
-
-	if (includeDefaults) {
-		addResult(loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
-		addResult(loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
+	const result: LoadPromptTemplatesResult = { templates: [], diagnostics: [] };
+	if (options.includeDefaults) {
+		appendResult(result, loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
+		appendResult(result, loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
 	}
 
-	// 3. Load explicit prompt paths
-	for (const rawPath of promptPaths) {
+	for (const rawPath of options.promptPaths) {
 		const resolvedPath = resolvePath(rawPath, resolvedCwd, { trim: true });
-		if (!existsSync(resolvedPath)) {
-			continue;
-		}
-
-		try {
-			const stats = statSync(resolvedPath);
-			if (stats.isDirectory()) {
-				addResult(loadTemplatesFromDir(resolvedPath, getSourceInfo));
-			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
-				const result = loadTemplateFromFile(resolvedPath, getSourceInfo(resolvedPath));
-				if (result.template) {
-					templates.push(result.template);
-				}
-				diagnostics.push(...result.diagnostics);
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "failed to read prompt template path";
-			diagnostics.push({ type: "warning", message, path: resolvedPath });
-		}
+		appendResult(result, loadPromptPath(resolvedPath, getSourceInfo));
 	}
+	return result;
+}
 
-	return { templates, diagnostics };
+/** Source info for a template path: user or project scope inside the default directories, otherwise a local path. */
+function getPromptSourceInfo(resolvedPath: string, globalPromptsDir: string, projectPromptsDir: string): SourceInfo {
+	if (isPathWithin(globalPromptsDir, resolvedPath)) {
+		return createSyntheticSourceInfo(resolvedPath, { source: "local", scope: "user", baseDir: globalPromptsDir });
+	}
+	if (isPathWithin(projectPromptsDir, resolvedPath)) {
+		return createSyntheticSourceInfo(resolvedPath, { source: "local", scope: "project", baseDir: projectPromptsDir });
+	}
+	return createSyntheticSourceInfo(resolvedPath, {
+		source: "local",
+		baseDir: statSync(resolvedPath).isDirectory() ? resolvedPath : dirname(resolvedPath),
+	});
+}
+
+/** Load an explicit prompt path: a directory of templates or one .md file. Missing and other paths load nothing. */
+function loadPromptPath(
+	resolvedPath: string,
+	getSourceInfo: (filePath: string) => SourceInfo,
+): LoadPromptTemplatesResult {
+	if (!existsSync(resolvedPath)) {
+		return { templates: [], diagnostics: [] };
+	}
+	try {
+		const stats = statSync(resolvedPath);
+		if (stats.isDirectory()) return loadTemplatesFromDir(resolvedPath, getSourceInfo);
+		if (stats.isFile() && resolvedPath.endsWith(".md")) {
+			return loadTemplateFromFile(resolvedPath, getSourceInfo(resolvedPath));
+		}
+		return { templates: [], diagnostics: [] };
+	} catch (error) {
+		return { templates: [], diagnostics: [errorWarning(error, "failed to read prompt template path", resolvedPath)] };
+	}
+}
+
+function appendResult(target: LoadPromptTemplatesResult, source: LoadPromptTemplatesResult): void {
+	target.templates.push(...source.templates);
+	target.diagnostics.push(...source.diagnostics);
+}
+
+function errorWarning(error: unknown, fallback: string, path: string): ResourceDiagnostic {
+	return { type: "warning", message: error instanceof Error ? error.message : fallback, path };
 }
 
 /**
