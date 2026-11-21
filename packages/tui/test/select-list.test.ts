@@ -129,3 +129,38 @@ describe("SelectList", () => {
 		assert.deepStrictEqual(selections, ["item-5", "item-10", "item-11", "item-6"]);
 	});
 });
+
+describe("SelectList navigation", () => {
+	const items = Array.from({ length: 4 }, (_, index) => ({ value: `item-${index}`, label: `Item ${index}` }));
+
+	it("wraps arrow keys around both ends and reports each change", () => {
+		const list = new SelectList(items, 3, testTheme);
+		const selections: string[] = [];
+		list.onSelectionChange = (item) => selections.push(item.value);
+
+		list.handleInput("\x1b[A");
+		list.handleInput("\x1b[B");
+		list.handleInput("\x1b[B");
+
+		assert.deepStrictEqual(selections, ["item-3", "item-0", "item-1"]);
+	});
+
+	it("clamps setSelectedIndex to the list and shows a scroll position", () => {
+		const list = new SelectList(items, 3, testTheme);
+
+		list.setSelectedIndex(10);
+		assert.strictEqual(list.getSelectedItem()?.value, "item-3");
+		assert.deepStrictEqual(list.render(40).slice(-1), ["  (4/4)"]);
+		list.setSelectedIndex(-5);
+		assert.strictEqual(list.getSelectedItem()?.value, "item-0");
+	});
+
+	it("shows the no-match message when the filter matches nothing", () => {
+		const list = new SelectList(items, 3, testTheme);
+
+		list.setFilter("zzz");
+
+		assert.deepStrictEqual(list.render(40), ["  No matching commands"]);
+		assert.strictEqual(list.getSelectedItem(), null);
+	});
+});
