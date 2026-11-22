@@ -603,11 +603,14 @@ list.setFilter("opt"); // Filter items
 ```
 
 **Controls:**
-- Mouse move/wheel: Highlight rows in alternate-screen mode
+- Mouse wheel: Move the selection one row in alternate-screen mode (hovering does not change it)
 - Click: Select a row
-- Arrow keys: Navigate
+- Arrow keys: Navigate, wrapping from the last row to the first and back
+- Page Up/Page Down: Move by one visible page
 - Enter: Select
 - Escape: Cancel
+
+The visible rows stay centered on the selection. When not every item fits in `maxVisible` rows, a `(N/M)` line shows the selected position.
 
 ### SettingsList
 
@@ -620,7 +623,10 @@ interface SettingItem {
   description?: string;
   currentValue: string;
   values?: string[];  // If provided, Enter/Space cycles through these
-  submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
+  submenu?: (
+    currentValue: string,
+    done: (selectedValue?: string, options?: { navigateTo?: string }) => void,
+  ) => Component;
 }
 
 interface SettingsListTheme {
@@ -639,17 +645,23 @@ const settings = new SettingsList(
   10,      // maxVisible
   theme,   // SettingsListTheme
   (id, newValue) => console.log(`${id} changed to ${newValue}`),
-  () => console.log("Cancelled")
+  () => console.log("Cancelled"),
+  { enableSearch: true } // optional: fuzzy-filter labels as the user types
 );
 settings.updateValue("theme", "light");
 ```
 
+A submenu calls `done(value)` to apply a value or `done()` to close without one; either way the item that opened it stays selected. `done(value, { navigateTo: id })` instead moves to the item `id` and opens its submenu.
+
 **Controls:**
-- Mouse move/wheel: Highlight rows in alternate-screen mode
+- Mouse wheel: Move the selection one row in alternate-screen mode (hovering does not change it)
 - Click: Activate a row
-- Arrow keys: Navigate
-- Enter/Space: Activate (cycle value or open submenu)
+- Arrow keys: Navigate, wrapping from the last row to the first and back
+- Page Up/Page Down: Move by one visible page
+- Enter/Space: Activate (cycle value or open submenu). With search enabled, Space types into the query once it is not empty.
 - Escape: Cancel
+
+Scrolling and the `(N/M)` position line work as in `SelectList`.
 
 ### Spacer
 
