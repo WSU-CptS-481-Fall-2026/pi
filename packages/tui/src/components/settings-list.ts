@@ -1,8 +1,15 @@
 import { fuzzyFilter } from "../fuzzy.ts";
-import { getKeybindings, getSelectPageIndex } from "../keybindings.ts";
+import { getKeybindings, getSelectPageIndex, type KeybindingsManager } from "../keybindings.ts";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
+import {
+	formatScrollPosition,
+	getItemIndexAtRow,
+	getVisibleRange,
+	wheelSelection,
+	wrapSelection,
+} from "./list-navigation.ts";
 
 export interface SettingItem {
 	/** Unique identifier for this setting */
@@ -126,98 +133,77 @@ export class SettingsList implements Component {
 			return lines;
 		}
 
-		// Calculate visible range with scrolling
-		const { startIndex, endIndex } = this.getVisibleRange(displayItems);
-
+		const range = getVisibleRange(this.selectedIndex, displayItems.length, this.maxVisible);
 		// Calculate max label width for alignment
 		const maxLabelWidth = Math.min(36, Math.max(...this.items.map((item) => visibleWidth(item.label))));
-
-		// Render visible items
-		for (let i = startIndex; i < endIndex; i++) {
+		for (let i = range.startIndex; i < range.endIndex; i++) {
 			const item = displayItems[i];
-			if (!item) continue;
-
-			const isSelected = i === this.selectedIndex;
-			const prefix = isSelected ? this.theme.cursor : "  ";
-			const prefixWidth = visibleWidth(prefix);
-
-			// Pad label to align values
-			const labelPadded = item.label + " ".repeat(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
-			const labelText = this.theme.label(labelPadded, isSelected);
-
-			// Calculate space for value
-			const separator = "  ";
-			const usedWidth = prefixWidth + maxLabelWidth + visibleWidth(separator);
-			const valueMaxWidth = width - usedWidth - 2;
-
-			const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
-
-			lines.push(truncateToWidth(prefix + labelText + separator + valueText, width));
+			if (item) lines.push(this.renderItemLine(item, i === this.selectedIndex, width, maxLabelWidth));
 		}
 
-		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < displayItems.length) {
-			const scrollText = `  (${this.selectedIndex + 1}/${displayItems.length})`;
-			lines.push(this.theme.hint(truncateToWidth(scrollText, width - 2, "")));
-		}
+		const scrollPosition = formatScrollPosition(this.selectedIndex, displayItems.length, range, width);
+		if (scrollPosition) lines.push(this.theme.hint(scrollPosition));
 
-		// Add description for selected item
-		const selectedItem = displayItems[this.selectedIndex];
-		if (selectedItem?.description) {
+		const description = displayItems[this.selectedIndex]?.description;
+		if (description) {
 			lines.push("");
-			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
-			for (const line of wrappedDesc) {
+			for (const line of wrapTextWithAnsi(description, width - 4)) {
 				lines.push(this.theme.description(`  ${line}`));
 			}
 		}
 
-		// Add hint
 		this.addHintLine(lines, width);
-
 		return lines;
+	}
+
+	private renderItemLine(item: SettingItem, isSelected: boolean, width: number, maxLabelWidth: number): string {
+		const prefix = isSelected ? this.theme.cursor : "  ";
+		// Pad label to align values
+		const labelPadded = item.label + " ".repeat(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
+		const labelText = this.theme.label(labelPadded, isSelected);
+
+		const separator = "  ";
+		const valueMaxWidth = width - (visibleWidth(prefix) + maxLabelWidth + visibleWidth(separator)) - 2;
+		const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
+
+		return truncateToWidth(prefix + labelText + separator + valueText, width);
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.submenuComponent) {
-			const result = this.submenuComponent.handleMouse?.(event);
-			return result ? { ...result, focus: true } : undefined;
+			return withFocus(this.submenuComponent.handleMouse?.(event));
 		}
 
 		if (this.searchEnabled && this.searchInput) {
-			if (event.y === 0) {
-				const result = this.searchInput.handleMouse?.(event);
-				return result ? { ...result, focus: true } : undefined;
-			}
+			if (event.y === 0) return withFocus(this.searchInput.handleMouse?.(event));
 			if (event.y === 1) return undefined;
 		}
 
-		const displayItems = this.getDisplayItems();
-		if (displayItems.length === 0) return undefined;
+		return this.handleListMouse(event, this.searchEnabled ? 2 : 0);
+	}
+
+	private handleListMouse(event: TuiMouseEvent, rowOffset: number): TuiMouseEventResult | undefined {
+		const itemCount = this.getDisplayItems().length;
+		if (itemCount === 0) return undefined;
 		if (event.type === "wheel" && event.wheelDelta) {
-			const delta = event.wheelDelta < 0 ? -1 : 1;
 			const previousIndex = this.selectedIndex;
-			this.selectedIndex = Math.max(0, Math.min(displayItems.length - 1, this.selectedIndex + delta));
+			this.selectedIndex = wheelSelection(this.selectedIndex, event.wheelDelta, itemCount);
 			return { handled: true, render: this.selectedIndex !== previousIndex };
 		}
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 
-		const rowOffset = this.searchEnabled ? 2 : 0;
-		const { startIndex, endIndex } = this.getVisibleRange(displayItems);
-		const itemIndex = startIndex + event.y - rowOffset;
-		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
+		const itemIndex = getItemIndexAtRow(event.y - rowOffset, this.selectedIndex, itemCount, this.maxVisible);
+		if (itemIndex === undefined) return undefined;
 		if (event.type === "press") {
 			this.mousePressedIndex = itemIndex;
 			this.selectedIndex = itemIndex;
 			return { handled: true, focus: true };
 		}
-		if (event.type === "click") {
-			this.selectedIndex = this.mousePressedIndex ?? itemIndex;
-			this.mousePressedIndex = undefined;
-			this.activateItem();
-			return { handled: true };
-		}
-		return undefined;
+		this.selectedIndex = this.mousePressedIndex ?? itemIndex;
+		this.mousePressedIndex = undefined;
+		this.activateItem();
+		return { handled: true };
 	}
 
 	handleInput(data: string): void {
@@ -228,23 +214,10 @@ export class SettingsList implements Component {
 			return;
 		}
 
-		// Main list input handling
 		const kb = getKeybindings();
-		const displayItems = this.getDisplayItems();
-		const pageIndex = getSelectPageIndex(kb, data, this.selectedIndex, displayItems.length, this.maxVisible);
-		if (kb.matches(data, "tui.select.up")) {
-			if (displayItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
-		} else if (kb.matches(data, "tui.select.down")) {
-			if (displayItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
-		} else if (pageIndex !== undefined) {
-			if (displayItems.length === 0) return;
-			this.selectedIndex = pageIndex;
-		} else if (
-			kb.matches(data, "tui.select.confirm") ||
-			(data === " " && (!this.searchEnabled || this.searchInput?.getValue().length === 0))
-		) {
+		if (this.moveSelection(kb, data)) return;
+
+		if (kb.matches(data, "tui.select.confirm") || this.isSpaceActivation(data)) {
 			this.activateItem();
 		} else if (kb.matches(data, "tui.select.cancel")) {
 			this.onCancel();
@@ -254,16 +227,31 @@ export class SettingsList implements Component {
 		}
 	}
 
-	private getDisplayItems(): SettingItem[] {
-		return this.searchEnabled ? this.filteredItems : this.items;
+	/** Apply the up, down and page keys. Returns whether `data` was one of them. */
+	private moveSelection(kb: KeybindingsManager, data: string): boolean {
+		const itemCount = this.getDisplayItems().length;
+		const pageIndex = getSelectPageIndex(kb, data, this.selectedIndex, itemCount, this.maxVisible);
+		let nextIndex: number;
+		if (kb.matches(data, "tui.select.up")) {
+			nextIndex = wrapSelection(this.selectedIndex, -1, itemCount);
+		} else if (kb.matches(data, "tui.select.down")) {
+			nextIndex = wrapSelection(this.selectedIndex, 1, itemCount);
+		} else if (pageIndex !== undefined) {
+			nextIndex = pageIndex;
+		} else {
+			return false;
+		}
+		if (itemCount > 0) this.selectedIndex = nextIndex;
+		return true;
 	}
 
-	private getVisibleRange(displayItems: readonly SettingItem[]): { startIndex: number; endIndex: number } {
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
-		);
-		return { startIndex, endIndex: Math.min(startIndex + this.maxVisible, displayItems.length) };
+	/** Space changes the selected setting unless it is part of a search query being typed. */
+	private isSpaceActivation(data: string): boolean {
+		return data === " " && (!this.searchEnabled || this.searchInput?.getValue().length === 0);
+	}
+
+	private getDisplayItems(): SettingItem[] {
+		return this.searchEnabled ? this.filteredItems : this.items;
 	}
 
 	private activateItem(): void {
@@ -330,4 +318,9 @@ export class SettingsList implements Component {
 			),
 		);
 	}
+}
+
+/** A nested component's mouse result, keeping focus on the list when the event was handled. */
+function withFocus(result: TuiMouseEventResult | undefined): TuiMouseEventResult | undefined {
+	return result ? { ...result, focus: true } : undefined;
 }
